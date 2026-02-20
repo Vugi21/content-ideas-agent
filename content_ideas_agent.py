@@ -3,6 +3,8 @@
 Content Ideas Agent - Generates satire/humor video ideas using Claude
 Sends weekly idea list via Gmail
 """
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, message=".*Pydantic V1.*")
 
 import os
 import json
