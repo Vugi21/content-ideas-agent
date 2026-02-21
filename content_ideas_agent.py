@@ -213,9 +213,9 @@ def send_email(subject: str, html_body: str):
         return False
 
 
-def run_agent():
+def main():
     """
-    Run the agent to generate and send ideas
+    Main agent execution
     """
     print("🚀 Content Ideas Agent Starting...")
     
@@ -254,46 +254,6 @@ def run_agent():
     send_email(subject, html_body)
     
     print("✅ Agent completed successfully!")
-
-
-def start_web_server():
-    """
-    Start a simple HTTP server to keep Render happy (listens on port 8000)
-    This allows the agent to run once, then keep the service alive
-    """
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    
-    class HealthCheckHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'Agent is running\n')
-            else:
-                self.send_response(404)
-                self.end_headers()
-        
-        def log_message(self, format, *args):
-            # Suppress logging
-            pass
-    
-    port = int(os.getenv('PORT', 8000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"🌐 Web server listening on port {port}")
-    server.serve_forever()
-
-
-def main():
-    """
-    Main execution: run agent once, then start web server
-    """
-    # Run the agent
-    run_agent()
-    
-    # Start web server to keep service alive
-    print("\n🔄 Starting web server...")
-    start_web_server()
 
 
 if __name__ == "__main__":
