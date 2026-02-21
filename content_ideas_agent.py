@@ -37,7 +37,7 @@ from email.mime.multipart import MIMEMultipart
 # ----------------------------
 # Config
 # ----------------------------
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 TOPICS_LIMIT = int(os.getenv("TOPICS_LIMIT", "10"))
 IDEAS_COUNT = int(os.getenv("IDEAS_COUNT", "15"))
 
