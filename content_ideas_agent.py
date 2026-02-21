@@ -71,7 +71,7 @@ Generate exactly 15 ideas. Make them specific, actionable, and funny. Prioritize
 
     message = client.messages.create(
         model="claude-sonnet-4-5-20250929",
-        max_tokens=1500,
+        max_tokens=4096,
         messages=[
             {"role": "user", "content": prompt}
         ]
@@ -235,7 +235,7 @@ def send_email(subject: str, html_body: str):
         # Send via Gmail SMTP
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_string())
+            server.sendmail(GMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_bytes())
         
         print(f"✅ Email sent successfully to {RECIPIENT_EMAIL}")
         return True
