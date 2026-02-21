@@ -198,8 +198,8 @@ def send_email(subject: str, html_body: str):
         msg["From"] = GMAIL_ADDRESS
         msg["To"] = RECIPIENT_EMAIL
         
-        # Attach HTML
-        msg.attach(MIMEText(html_body, "html"))
+        # Attach HTML with UTF-8 encoding
+        msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
         
         # Send via Gmail SMTP
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
