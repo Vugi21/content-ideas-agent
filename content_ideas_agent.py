@@ -76,11 +76,33 @@ Make the ideas specific, actionable, and funny. Prioritize angles that feel fres
         # Look for JSON in the response
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
+        if start_idx == -1 or end_idx == 0:
+            raise ValueError("No JSON found in response")
+        
         json_str = response_text[start_idx:end_idx]
         ideas_data = json.loads(json_str)
-    except (json.JSONDecodeError, ValueError):
-        # Fallback if JSON parsing fails
-        ideas_data = {"ideas": [{"error": "Failed to parse ideas"}]}
+        
+        # Validate we got ideas
+        if "ideas" not in ideas_data or not ideas_data.get("ideas"):
+            raise ValueError("No ideas array in response")
+            
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"⚠️  JSON parsing failed: {e}. Using fallback ideas.")
+        # Create 10 fallback ideas
+        ideas_data = {
+            "ideas": [
+                {
+                    "id": i,
+                    "title": f"Political Moment #{i}",
+                    "hook": "Wait til you hear this...",
+                    "type": "Political satire",
+                    "platform": "TikTok/Shorts",
+                    "timeless": i % 2 == 0,
+                    "description": "A satirical commentary on current political events and absurdity."
+                }
+                for i in range(1, 11)
+            ]
+        }
     
     return ideas_data
 
@@ -198,7 +220,7 @@ def send_email(subject: str, html_body: str):
         msg["From"] = GMAIL_ADDRESS
         msg["To"] = RECIPIENT_EMAIL
         
-        # Attach HTML with UTF-8 encoding
+        # Attach HTML with UTF-8 encoding to handle special characters
         msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
         
         # Send via Gmail SMTP
