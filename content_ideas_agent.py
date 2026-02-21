@@ -30,7 +30,7 @@ def generate_video_ideas(trending_topics: list[str]) -> dict:
     
     prompt = f"""You are a creative content strategist specializing in satire, humor, and political commentary.
 
-Generate 15 video ideas for a creator who makes satirical, humorous content about politics, current events, pop culture, and everyday life.
+Generate exactly 15 video ideas for a creator who makes satirical, humorous content about politics, current events, pop culture, and everyday life.
 
 TRENDING TOPICS THIS WEEK:
 {topics_str}
@@ -43,26 +43,35 @@ For each idea, provide:
 5. Timeless or Topical (will this age well?)
 6. Brief description (2-3 sentences)
 
-FORMAT YOUR RESPONSE AS JSON with this structure:
+RESPOND WITH ONLY VALID JSON. NO MARKDOWN, NO COMMENTS, JUST JSON:
 {{
   "ideas": [
     {{
       "id": 1,
-      "title": "...",
-      "hook": "...",
-      "type": "...",
-      "platform": "...",
-      "timeless": true/false,
-      "description": "..."
+      "title": "Example Title",
+      "hook": "Example hook text",
+      "type": "Political satire",
+      "platform": "TikTok/Shorts",
+      "timeless": true,
+      "description": "Example description here."
+    }},
+    {{
+      "id": 2,
+      "title": "Second Idea Title",
+      "hook": "Second hook",
+      "type": "Pop culture",
+      "platform": "Both",
+      "timeless": false,
+      "description": "Another description."
     }}
   ]
 }}
 
-Make the ideas specific, actionable, and funny. Prioritize angles that feel fresh and satirical, not surface-level observations."""
+Generate exactly 15 ideas. Make them specific, actionable, and funny. Prioritize angles that feel fresh and satirical."""
 
     message = client.messages.create(
-        model="claude-opus-4-5-20251101",
-        max_tokens=2000,
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=1500,
         messages=[
             {"role": "user", "content": prompt}
         ]
