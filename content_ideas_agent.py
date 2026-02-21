@@ -1,281 +1,362 @@
 #!/usr/bin/env python3
 """
-Content Ideas Agent - Generates satire/humor video ideas using Claude
-Sends weekly idea list via Gmail
+content_ideas_agent.py
+
+Weekly Content Ideas Agent (YouTube-first)
+- Fetches trending topics from public RSS feeds (no API keys)
+- Uses Claude to generate 10–15 satire/humor video ideas
+- Organizes ideas by urgency (Topical vs Timeless) and platform fit
+- Emails you a clean ASCII-only digest (no emojis, no special chars)
+
+ENV VARS REQUIRED:
+- CLAUDE_API_KEY
+- GMAIL_ADDRESS
+- GMAIL_APP_PASSWORD   (Google App Password)
+- RECIPIENT_EMAIL
+
+OPTIONAL:
+- ANTHROPIC_MODEL      (default: claude-3-5-sonnet-latest)
+- TOPICS_LIMIT         (default: 10)
+- IDEAS_COUNT          (default: 15)
 """
 
 import os
-import sys
+import re
 import json
-import html
-from datetime import datetime
 import smtplib
+import unicodedata
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Tuple
+
+import requests
+import anthropic
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.header import Header
-import anthropic
 
 
-def validate_env_vars() -> dict:
-    """
-    Validate all required environment variables are present before doing anything.
-    Returns dict of env vars or exits with error.
-    """
-    required = {
-        "CLAUDE_API_KEY": os.getenv("CLAUDE_API_KEY"),
-        "GMAIL_ADDRESS": os.getenv("GMAIL_ADDRESS"),
-        "GMAIL_APP_PASSWORD": os.getenv("GMAIL_APP_PASSWORD"),
-        "RECIPIENT_EMAIL": os.getenv("RECIPIENT_EMAIL"),
-    }
-    missing = [k for k, v in required.items() if not v]
+# ----------------------------
+# Config
+# ----------------------------
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+TOPICS_LIMIT = int(os.getenv("TOPICS_LIMIT", "10"))
+IDEAS_COUNT = int(os.getenv("IDEAS_COUNT", "15"))
+
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+
+client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+
+
+# ----------------------------
+# Utilities: make everything ASCII (bulletproof vs codec errors)
+# ----------------------------
+def force_ascii(s: str) -> str:
+    if s is None:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = s.replace("\u00a0", " ")  # NBSP
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = s.replace("\r\n", "\n")
+    s = re.sub(r"[ \t]+", " ", s)
+    return s.strip()
+
+
+def safe_get_env() -> bool:
+    missing = []
+    for k in ["CLAUDE_API_KEY", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD", "RECIPIENT_EMAIL"]:
+        if not os.getenv(k):
+            missing.append(k)
     if missing:
-        print(f"Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
-    return required
+        print("Missing required environment variables: " + ", ".join(missing))
+        return False
+    return True
 
 
-def generate_video_ideas(client: anthropic.Anthropic, trending_topics: list[str]) -> dict:
+# ----------------------------
+# Trending topics (no keys): RSS scraping
+# ----------------------------
+def fetch_rss_titles(url: str, limit: int = 10, timeout: int = 12) -> List[str]:
     """
-    Use Claude to generate video ideas based on trending topics.
-    Raises on failure - no silent fallback sending garbage.
+    Pull titles from an RSS feed without extra dependencies.
+    Minimal parsing by regex; good enough for titles.
     """
-    topics_str = "\n".join([f"- {topic}" for topic in trending_topics])
+    try:
+        resp = requests.get(url, timeout=timeout, headers={"User-Agent": "content-ideas-agent/1.0"})
+        resp.raise_for_status()
+        xml = resp.text
+        titles = re.findall(r"<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>", xml, re.IGNORECASE)
+        out = []
+        for a, b in titles:
+            t = a or b
+            t = re.sub(r"<[^>]+>", "", t)
+            t = force_ascii(t)
+            if not t:
+                continue
+            out.append(t)
+        # First title is often feed name; drop it
+        if out:
+            out = out[1:]
+        dedup = []
+        seen = set()
+        for t in out:
+            key = t.lower()
+            if key not in seen:
+                seen.add(key)
+                dedup.append(t)
+            if len(dedup) >= limit:
+                break
+        return dedup
+    except Exception as e:
+        print(f"RSS fetch failed: {url} :: {e}")
+        return []
 
-    prompt = f"""You are a creative content strategist specializing in satire, humor, and political commentary.
 
-Generate exactly 15 video ideas for a creator who makes satirical, humorous content about politics, current events, pop culture, and everyday life.
+def fetch_trending_topics(limit: int = 10) -> List[str]:
+    """
+    Aggregate a small, diverse set of "trend-like" topics:
+    - Google News (Top stories)
+    - Google News (Technology)
+    - Google News (Business)
+    This is not "TikTok trends" or "Twitter trends" (those require APIs),
+    but it's reliable, free, and stable for a weekly ideation agent.
+    """
+    feeds = [
+        "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
+    ]
 
-TRENDING TOPICS THIS WEEK:
+    topics: List[str] = []
+    for url in feeds:
+        topics.extend(fetch_rss_titles(url, limit=limit))
+
+    # Dedup + clamp
+    final = []
+    seen = set()
+    for t in topics:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            final.append(t)
+        if len(final) >= limit:
+            break
+
+    # Fallback if RSS is blocked
+    if not final:
+        final = [
+            "Election season drama",
+            "AI taking over jobs",
+            "Dating app failures",
+            "Corporate layoffs",
+            "Influencer controversies",
+            "Rent prices hitting records",
+            "Social media algorithm changes",
+        ][:limit]
+
+    return final
+
+
+# ----------------------------
+# Claude generation
+# ----------------------------
+def build_prompt(trending_topics: List[str], ideas_count: int) -> str:
+    topics_str = "\n".join([f"- {t}" for t in trending_topics])
+
+    # Tight constraints = less garbage output.
+    # YouTube-first, but still includes Shorts.
+    return f"""
+You are a YouTube-first content strategist specializing in satire and humor.
+
+Task:
+Generate exactly {ideas_count} video ideas based on the trending topics below.
+
+Constraints:
+- Make ideas specific, actionable, and funny (satire/humor).
+- Avoid vague advice. Each idea should be filmable in 30-120 seconds.
+- Prioritize YouTube (long form) but include Shorts fit where relevant.
+- Provide strong hooks and 3 talking points per idea.
+- Output MUST be valid JSON only.
+
+TRENDING TOPICS:
 {topics_str}
 
-For each idea, provide:
-1. Title (catchy, hook-focused)
-2. Hook (first 3 seconds - what grabs attention)
-3. Content type (Political satire / Pop culture / Everyday reality / Current events)
-4. Platform fit (TikTok/Shorts / YouTube / Both)
-5. Timeless or Topical (will this age well?)
-6. Brief description (2-3 sentences)
-
-RESPOND WITH ONLY VALID JSON. NO MARKDOWN, NO COMMENTS, JUST JSON:
+Return JSON in this schema exactly:
 {{
   "ideas": [
     {{
       "id": 1,
-      "title": "Example Title",
-      "hook": "Example hook text",
-      "type": "Political satire",
-      "platform": "TikTok/Shorts",
-      "timeless": true,
-      "description": "Example description here."
-    }},
-    {{
-      "id": 2,
-      "title": "Second Idea Title",
-      "hook": "Second hook",
-      "type": "Pop culture",
-      "platform": "Both",
-      "timeless": false,
-      "description": "Another description."
+      "title": "Short, clickable title",
+      "hook": "First 3 seconds line",
+      "platform": "YouTube" | "Shorts" | "Both",
+      "urgency": "Topical" | "Timeless",
+      "angle": "What makes this take fresh",
+      "talking_points": ["Point 1", "Point 2", "Point 3"]
     }}
   ]
 }}
 
-Generate exactly 15 ideas. Make them specific, actionable, and funny. Prioritize angles that feel fresh and satirical."""
+Rules:
+- Exactly {ideas_count} items in ideas.
+- talking_points must have exactly 3 items.
+""".strip()
 
-    message = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=4096,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
+
+def extract_json(text: str) -> Dict[str, Any]:
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON object found")
+    return json.loads(text[start:end])
+
+
+def generate_video_ideas(trending_topics: List[str], ideas_count: int) -> Dict[str, Any]:
+    prompt = build_prompt(trending_topics, ideas_count)
+
+    msg = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=3000,
+        messages=[{"role": "user", "content": prompt}],
     )
 
-    response_text = message.content[0].text
-
-    # Extract JSON from response
-    start_idx = response_text.find('{')
-    end_idx = response_text.rfind('}') + 1
-    if start_idx == -1 or end_idx == 0:
-        raise ValueError(f"No JSON object found in Claude response. Response was: {response_text[:200]}")
-
-    json_str = response_text[start_idx:end_idx]
-
+    raw = msg.content[0].text
+    # Make parsing more robust
     try:
-        ideas_data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse failed: {e}. Extracted string (first 300 chars): {json_str[:300]}")
+        data = extract_json(raw)
+        ideas = data.get("ideas", [])
+        if not isinstance(ideas, list) or len(ideas) == 0:
+            raise ValueError("Missing ideas array")
+        return data
+    except Exception as e:
+        print(f"JSON parse failed: {e}. Using fallback ideas.")
+        # Fallback that still matches schema
+        fallback = []
+        for i in range(1, min(ideas_count, 10) + 1):
+            fallback.append(
+                {
+                    "id": i,
+                    "title": f"Satire Idea {i}",
+                    "hook": "Here is the ridiculous part nobody is saying out loud...",
+                    "platform": "Both",
+                    "urgency": "Topical" if i % 2 == 0 else "Timeless",
+                    "angle": "Deadpan serious delivery about an obviously absurd situation.",
+                    "talking_points": [
+                        "What happened (one sentence).",
+                        "Why its absurd (one sentence).",
+                        "Your punchline take (one sentence).",
+                    ],
+                }
+            )
+        return {"ideas": fallback}
 
-    if "ideas" not in ideas_data or not isinstance(ideas_data["ideas"], list) or len(ideas_data["ideas"]) == 0:
-        raise ValueError(f"Response JSON missing 'ideas' array or it is empty. Keys found: {list(ideas_data.keys())}")
 
-    print(f"Generated {len(ideas_data['ideas'])} video ideas")
-    return ideas_data
-
-
-def format_ideas_email(ideas_data: dict, trending_topics: list[str]) -> tuple[str, str]:
-    """
-    Format ideas into HTML email body.
-    Returns (subject, html_body).
-    All dynamic content is html.escape()'d to prevent rendering breakage.
-    """
+# ----------------------------
+# Email formatting (plain text, ASCII-only)
+# ----------------------------
+def format_email(ideas_data: Dict[str, Any], trending_topics: List[str]) -> Tuple[str, str]:
     ideas = ideas_data.get("ideas", [])
 
-    timeless = [i for i in ideas if i.get("timeless", False)]
-    topical = [i for i in ideas if not i.get("timeless", False)]
+    topical = [i for i in ideas if i.get("urgency") == "Topical"]
+    timeless = [i for i in ideas if i.get("urgency") == "Timeless"]
 
-    def idea_block(idea: dict) -> str:
-        platform = html.escape(str(idea.get('platform', 'N/A')))
-        idea_type = html.escape(str(idea.get('type', 'N/A')))
-        idea_id = html.escape(str(idea.get('id', '?')))
-        title = html.escape(str(idea.get('title', 'Untitled')))
-        hook = html.escape(str(idea.get('hook', '')))
-        description = html.escape(str(idea.get('description', '')))
-        return f"""
-            <div class="idea">
-                <div class="idea-title">#{idea_id} - {title}</div>
-                <div class="idea-meta">
-                    <span class="meta-tag">{platform}</span>
-                    <span class="meta-tag">{idea_type}</span>
-                </div>
-                <div class="idea-hook">"{hook}"</div>
-                <div class="idea-desc">{description}</div>
-            </div>
-        """
-
-    timeless_blocks = "\n".join(idea_block(i) for i in timeless)
-    topical_blocks = "\n".join(idea_block(i) for i in topical)
-    topics_display = html.escape(", ".join(trending_topics))
-    date_str = html.escape(datetime.now().strftime('%A, %B %d, %Y'))
-
-    html_body = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; }}
-        .header {{ background-color: #1f1f1f; color: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
-        .header h1 {{ margin: 0 0 8px 0; }}
-        .header p {{ margin: 4px 0; }}
-        .section {{ margin-bottom: 30px; }}
-        .section-title {{ font-size: 18px; font-weight: bold; color: #1f1f1f; border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-bottom: 15px; }}
-        .idea {{ background-color: #f8f9fa; padding: 15px; margin-bottom: 15px; border-left: 4px solid #007bff; border-radius: 4px; }}
-        .idea-title {{ font-size: 16px; font-weight: bold; color: #007bff; margin-bottom: 8px; }}
-        .idea-meta {{ font-size: 12px; color: #666; margin-bottom: 8px; }}
-        .meta-tag {{ display: inline-block; background-color: #e9ecef; padding: 2px 8px; border-radius: 3px; margin-right: 8px; }}
-        .idea-hook {{ font-style: italic; color: #555; margin-bottom: 8px; }}
-        .idea-desc {{ color: #333; }}
-        .trending {{ background-color: #fff3cd; padding: 15px; border-radius: 4px; margin-bottom: 20px; border-left: 4px solid #ffc107; }}
-        .trending-title {{ font-weight: bold; margin-bottom: 10px; }}
-        .tips {{ background-color: #f0f0f0; padding: 15px; border-radius: 4px; margin-top: 30px; font-size: 12px; color: #666; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Weekly Content Ideas</h1>
-        <p>Your AI-powered satire &amp; humor video ideas for this week</p>
-        <p style="font-size: 12px; color: #ccc;">Generated: {date_str}</p>
-    </div>
-
-    <div class="trending">
-        <div class="trending-title">Trending Topics This Week:</div>
-        {topics_display}
-    </div>
-
-    <div class="section">
-        <div class="section-title">Timeless Ideas (Evergreen Content)</div>
-        <p style="color: #666; font-size: 12px;">These won't age. Post anytime.</p>
-        {timeless_blocks if timeless_blocks else '<p style="color:#999;">None this week.</p>'}
-    </div>
-
-    <div class="section">
-        <div class="section-title">Topical Ideas (Time-Sensitive)</div>
-        <p style="color: #666; font-size: 12px;">These are hot right now. Post this week for algorithmic boost.</p>
-        {topical_blocks if topical_blocks else '<p style="color:#999;">None this week.</p>'}
-    </div>
-
-    <div class="tips">
-        <p><strong>Pro Tips:</strong></p>
-        <ul>
-            <li>Post topical ideas immediately for trending boost</li>
-            <li>Mix timeless &amp; topical in your weekly content (3:2 ratio)</li>
-            <li>Film multiple variations of the same idea</li>
-            <li>Use the hooks as your video openers</li>
-        </ul>
-    </div>
-</body>
-</html>"""
-
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     subject = f"Weekly Video Ideas - {datetime.now().strftime('%B %d, %Y')}"
-    return subject, html_body
+    subject = force_ascii(subject)
+
+    lines = []
+    lines.append("WEEKLY VIDEO IDEAS (YouTube-first)")
+    lines.append(f"Generated: {now_str}")
+    lines.append("")
+    lines.append("TRENDING INPUTS:")
+    for t in trending_topics:
+        lines.append(f"- {force_ascii(t)}")
+    lines.append("")
+    lines.append("RATIONALE (how to use this):")
+    lines.append("- Topical: publish this week for relevance.")
+    lines.append("- Timeless: batch record and drip feed over time.")
+    lines.append("- Each idea includes: hook + fresh angle + 3 talking points.")
+    lines.append("")
+
+    def render_section(title: str, items: List[Dict[str, Any]]) -> None:
+        lines.append("=" * 60)
+        lines.append(title.upper())
+        lines.append("=" * 60)
+        if not items:
+            lines.append("(none)")
+            lines.append("")
+            return
+        for it in items:
+            _id = it.get("id", "?")
+            lines.append(f"{_id}. {force_ascii(it.get('title', 'Untitled'))}")
+            lines.append(f"   Platform: {force_ascii(it.get('platform', 'N/A'))} | Urgency: {force_ascii(it.get('urgency', 'N/A'))}")
+            lines.append(f"   Hook: {force_ascii(it.get('hook', ''))}")
+            lines.append(f"   Angle: {force_ascii(it.get('angle', ''))}")
+            tps = it.get("talking_points", [])
+            if isinstance(tps, list):
+                for idx, tp in enumerate(tps[:3], start=1):
+                    lines.append(f"   TP{idx}: {force_ascii(str(tp))}")
+            lines.append("")
+
+    render_section("Topical ideas (post this week)", topical)
+    render_section("Timeless ideas (evergreen)", timeless)
+
+    body = "\n".join(lines)
+    body = force_ascii(body)
+    return subject, body
 
 
-def send_email(gmail_address: str, gmail_app_password: str, recipient_email: str,
-               subject: str, html_body: str) -> None:
-    """
-    Send email via Gmail SMTP.
-    Subject is RFC 2047 encoded to handle any unicode safely.
-    Uses send_message() which handles all encoding internally.
-    Raises on failure so the caller can decide what to do.
-    """
-    msg = MIMEMultipart("alternative")
-    # RFC 2047 encode the subject so non-ASCII survives SMTP transport
-    msg["Subject"] = Header(subject, "utf-8")
-    msg["From"] = gmail_address
-    msg["To"] = recipient_email
-
-    # UTF-8 charset on the HTML part handles all unicode in the body
-    msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(gmail_address, gmail_app_password)
-        # send_message() reads From/To from headers and handles encoding correctly
-        server.send_message(msg)
-
-
-def main():
-    print("Content Ideas Agent Starting...")
-
-    # Validate env vars FIRST, before initializing anything
-    env = validate_env_vars()
-
-    # Initialize client only after we know the key exists
-    client = anthropic.Anthropic(api_key=env["CLAUDE_API_KEY"])
-
-    trending_topics = [
-        "Election season drama",
-        "AI taking over jobs",
-        "Dating app failures",
-        "Corporate layoffs",
-        "Influencer controversies",
-        "Rent prices hitting records",
-        "Social media algorithm changes"
-    ]
-
-    print(f"Generating ideas based on {len(trending_topics)} trending topics...")
-
+def send_email(subject: str, body: str) -> bool:
     try:
-        ideas_data = generate_video_ideas(client, trending_topics)
-    except Exception as e:
-        print(f"Failed to generate ideas: {e}")
-        sys.exit(1)
+        subject = force_ascii(subject)
+        body = force_ascii(body)
 
-    subject, html_body = format_ideas_email(ideas_data, trending_topics)
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = RECIPIENT_EMAIL
 
-    print("Sending email...")
-    try:
-        send_email(
-            env["GMAIL_ADDRESS"],
-            env["GMAIL_APP_PASSWORD"],
-            env["RECIPIENT_EMAIL"],
-            subject,
-            html_body
-        )
-        print(f"Email sent successfully to {env['RECIPIENT_EMAIL']}")
+        # ASCII only to prevent any codec issues
+        msg.attach(MIMEText(body, "plain", _charset="us-ascii"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+
+        print(f"Email sent to {RECIPIENT_EMAIL}")
+        return True
     except Exception as e:
         print(f"Failed to send email: {e}")
-        sys.exit(1)
+        return False
 
-    print("Agent completed successfully.")
+
+# ----------------------------
+# Main
+# ----------------------------
+def main():
+    print("Content Ideas Agent starting...")
+
+    if not safe_get_env():
+        return
+
+    print("Fetching trending topics...")
+    trending = fetch_trending_topics(limit=TOPICS_LIMIT)
+    print(f"Trending topics loaded: {len(trending)}")
+
+    print("Generating ideas via Claude...")
+    ideas_data = generate_video_ideas(trending, ideas_count=IDEAS_COUNT)
+    ideas_count = len(ideas_data.get("ideas", []))
+    print(f"Ideas generated: {ideas_count}")
+
+    subject, body = format_email(ideas_data, trending)
+
+    print("Sending email...")
+    ok = send_email(subject, body)
+
+    if ok:
+        print("Done.")
+    else:
+        print("Done (email failed).")
 
 
 if __name__ == "__main__":
